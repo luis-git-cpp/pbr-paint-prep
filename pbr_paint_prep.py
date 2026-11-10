@@ -1,5 +1,19 @@
 # -*- coding: utf-8 -*-
+"""
+PBR Paint Prep  -  Blender 4.x / 5.x
 
+COMO USAR
+1. Importe o modelo (ex.: saída do TripoSR), selecione-o e abra este arquivo no
+   editor de texto do Blender (Scripting > Open). Rode com Alt+P.
+2. No viewport aperte N: aparece a aba "PBR" com 3 botões.
+   1) Preparar    -> cria low-poly + UV + texturas + material + bake (normal, AO,
+                     cor de vértice -> albedo) e entra no modo de pintura.
+   2) Modo pintura-> volta para o Texture Paint (troque de textura em "Texture Slots").
+   3) Finalizar   -> salva tudo, empacota ORM (AO/Roughness/Metallic) e exporta o GLB.
+
+Pinte: albedo, roughness, metallic (e emissive, se quiser).
+Não pinte: normal e AO (vêm do bake). O ORM só é montado no passo 3.
+"""
 import bpy
 import math
 import traceback
@@ -372,11 +386,7 @@ def finalizar(obj):
     nome = nome_do(obj)
     pasta = pasta_saida()
     imgs = {k: bpy.data.images.get(f"{nome}_{k}") for k in CANAIS + ("emissive",)}
-    faltando = [k for k in CANAIS if imgs[k] is None]
-    if faltando:
-        raise RuntimeError(f"Texturas não encontradas: {faltando}. Rode o passo 1.")
-
-    w, h = imgs["ao"].size
+    w, h = validar_imagens(imgs)
     n = w * h
     for img in imgs.values():
         if img:
@@ -409,20 +419,22 @@ def finalizar(obj):
 
     # --- material de export + GLB --------------------------------------
     mat_pintura = bpy.data.materials.get(f"{nome}_PINTURA")
+    if mat_pintura is None:
+        raise RuntimeError("Material de pintura não encontrado. Rode o passo 1.")
     mat_exp = construir_material(f"{nome}_EXPORT", exp, empacotado=True)
-    obj.data.materials.clear()
-    obj.data.materials.append(mat_exp)
     caminho = str(pasta.parent / f"{nome}.glb")
-    selecionar([obj])
     try:
+        obj.data.materials.clear()
+        obj.data.materials.append(mat_exp)
+        selecionar([obj])
         bpy.ops.export_scene.gltf(filepath=caminho, export_format='GLB',
                                   use_selection=True, export_apply=True,
                                   export_image_format='AUTO')
     finally:
         obj.data.materials.clear()
-        if mat_pintura:
-            obj.data.materials.append(mat_pintura)
-        bpy.data.materials.remove(mat_exp)
+        obj.data.materials.append(mat_pintura)
+        if mat_exp.name in bpy.data.materials:
+            bpy.data.materials.remove(mat_exp)
 
     avisos = []
     if triangulos(obj) > 20000:
@@ -441,6 +453,25 @@ def _objeto_malha(op, context):
         op.report({'ERROR'}, "Selecione a malha primeiro.")
         return None
     return obj
+
+
+def validar_imagens(imgs):
+    """Confere imagens necessárias e dimensões antes de montar o ORM."""
+    faltando = [k for k in CANAIS if imgs.get(k) is None]
+    if faltando:
+        raise RuntimeError(f"Texturas não encontradas: {faltando}. Rode o passo 1.")
+    tamanhos = {k: tuple(imgs[k].size) for k in CANAIS}
+    referencia = tamanhos["ao"]
+    diferentes = {k: tamanho for k, tamanho in tamanhos.items()
+                  if tamanho != referencia}
+    if diferentes:
+        raise RuntimeError(
+            f"As texturas precisam ter o mesmo tamanho. AO={referencia}; "
+            f"divergentes={diferentes}"
+        )
+    if referencia[0] < 1 or referencia[1] < 1:
+        raise RuntimeError("Uma ou mais texturas não têm pixels carregados.")
+    return referencia
 
 
 class PBR_OT_preparar(bpy.types.Operator):
@@ -489,6 +520,12 @@ class PBR_OT_finalizar(bpy.types.Operator):
         obj = _objeto_malha(self, context)
         if not obj:
             return {'CANCELLED'}
+        if obj.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except RuntimeError as e:
+                self.report({'ERROR'}, f"Não foi possível sair do modo atual: {e}")
+                return {'CANCELLED'}
         try:
             caminho, avisos = finalizar(obj)
         except Exception as e:
